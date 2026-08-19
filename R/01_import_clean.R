@@ -1,9 +1,55 @@
+rm(list = ls())
+
 library(data.table)
 library(stringr)
+library(dplyr)
 
+#setwd("Specify your working directory here")
+#setwd("D:/BVRC/R/SIPex_upload/sipex_docs-main/sipex_docs") 
+setwd("D:\\BVRC\\R\\Github\\sipex_docs") #This is Rover's directory, change to your own
+
+#######################
+#### Main settings ####
+#######################
+
+upload_collection <- "downloads_081126.csv" #specify the collection to upload
 in_dir <- "cleaned"
 out_dir <- "../sipex_upload"
+script_dir <- "R"
+ref_results <- "ref_results"
+ref_df <- "ref_source"
 
+#switch for cross referencing the controlled taglist. Set to TRUE to run the audit, FALSE to skip it.
+run_tag_audit <- TRUE
+
+#switch for descriptive location spelling check. Set to TRUE to run the audit, FALSE to skip it.
+check_loc_spelling <- TRUE
+
+#######################
+#######################
+#load and pre process raw collection csv
+raw_collection <- fread(file.path(in_dir, upload_collection))
+current_collection <- raw_collection %>% 
+  slice(-1) %>%
+  filter(!str_detect(
+    `Tagging Complete?`,
+    fixed("No - do not upload to SIPex")
+  )) %>%
+  select(
+    -`Tagging Complete?`,
+    -`Uploaded to SIPex?`,
+    -DOI,
+    -`License Disclaimer`,
+    -Latitude,
+    -Longitude
+  )
+
+write.csv(current_collection, file.path(in_dir, "current_collection.csv"), row.names = FALSE)
+
+# View(current_collection)
+
+#######################
+#######################
 # Title and Descriptions accept parenthesis, punctuations, apostrophes and hyphens.
 # Tags don't accept special characters but accepts dashes, spaces, underscores and capitalization.
 #No slashes or ampersands
@@ -12,27 +58,16 @@ out_dir <- "../sipex_upload"
 #of the categories
 # comma separated for multiple categories
 
-#d1 <- fread(file.path(in_dir,"downloads_012626.csv"))
-d1 <- fread(file.path(in_dir,"downloads_080426.csv"))
+# data associated with LTR
+# batch uploads at the end of Septemeber:
+d1 <- current_collection
+# d1 <- fread(file.path(in_dir, "current_collection.csv"))
+# update to include additional training entries:
+# d1 <- fread(file.path(in_dir,"downloads_061025.csv"))
 
-# read in the docs to upload:
-#uploads <- fread(file.path(in_dir,"02_Collection Master List - ALL.csv"))
-uploads <- fread(file.path(in_dir,"02_Collection Master List - ALL - coll6.csv"))
-#AC: If you don't want to, you don't need to use the uploads doc. For small
-# batches, I don't think you necessarily need it
+# update to include more from C3:
+# d1 <- fread(file.path(in_dir,"downloads_071025.csv"))
 
-
-setnames(uploads, c("doc_id", "Document or Training Material",
-                    "Document File Name\n \n(title_location_year published)"),
-                    c("ID","Title", "Path"))
-uploads <- uploads[,.(ID, upload_now, Title, `Uploaded to SIPex?`)]
-
-upload_now <- uploads[upload_now == "Yes"]
-special_chars <- unique(unlist(strsplit(paste(upload_now$Title, collapse = ""), "")))
-special_chars <- special_chars[grepl("[^[:alnum:]\\s]", special_chars)]
-chars_to_remove <- "[:,/?\r–&*_;]"
-upload_now[, Title := gsub(chars_to_remove, " ", Title)]
-upload_now[, Title := gsub("\\s+", " ", trimws(Title))]
 
 #d1 <- d1[`Upload to SIPex?` == "Yes - upload to SIPex"]
 #clean colnames:
@@ -49,6 +84,10 @@ setnames(d1, gsub("/", "", names(d1), fixed = TRUE))
 setnames(d1, gsub("\r", "", names(d1), fixed = TRUE))
 setnames(d1, trimws(names(d1)))
 names(d1)
+
+d1[, Title := gsub("\r?\n", " ", Title)]
+d1[, Title := gsub("\\s+", " ", trimws(Title))]
+d1[, Title := gsub("/", " and ", trimws(Title))]
 
 # Titles ---------------------------------
 d1$Title
@@ -105,15 +144,6 @@ setcolorder(d1, c("ID","Title", "Organization",
 d4 <- d1[,.(ID, Title, `Document Name (title_location_year published)`)]
 setnames(d4, c("ID","Title","Document Name (title_location_year published)"),
          c("Dataset_ID","Name","Path"))
-d4[, Path := gsub("[\n\r]+", " ", Path)]
-d4[, Path := {
-  p <- trimws(Path)
-  ifelse(
-    grepl("^https", p, ignore.case = TRUE) | grepl("\\.pdf$", p, ignore.case = TRUE),
-    p,
-    paste0(p, ".pdf")
-  )
-}]
 #might need to get rid of parentheses in Organization - not sure yet
 #now pull out groups and add to a new column:
 
@@ -165,7 +195,7 @@ d2[, Tags := gsub(",\\s*$", "", Tags)]
 
 #check tags ---------------------
 sort(unique(trimws(unlist(strsplit(d2$Tags, ",")))))
-d2[d2[, grepl("Balsam", Tags, ignore.case = TRUE)],.(Tags)]
+d2[d2[, grepl("Caribou", Tags, ignore.case = TRUE)]]
 
 #Description ----------------------------
 d2[, Description := gsub("\\(.*?\\)", "", Description)]
@@ -179,9 +209,11 @@ d2[, Description := gsub("\\s*\\.\\s*", ". ", Description)]       # Remove any s
 
 
 #Descriptive location --------------------
-sort(unique(trimws(unlist(strsplit(d2$`Descriptive Location`, ",")))))
-#setnames(d2, c("Descriptive location"), 
- #        c("Descriptive Location"))
+sort(unique(trimws(unlist(strsplit(d2$`Descriptive location`, ",")))))
+setnames(d2, c("Descriptive location"), 
+         c("Descriptive Location"))
+
+
 
 #cleaning authors names: ----------------------
 sort(unique(trimws(unlist(strsplit(d2$`Author(s)`, ",")))))
@@ -199,10 +231,57 @@ sort(unique(trimws(unlist(strsplit(d2$`Author(s)`, ",")))))
 #check descriptive location --------------------
 sort(unique(trimws(unlist(strsplit(d2$`Descriptive Location`, ",")))))
 
+#Optional: check descriptive location spelling against BC Gazetteer
+if (isTRUE(check_loc_spelling)) {
+  message("\033[31;1mChecking descriptive location spelling...\033[0m")
+  library(openxlsx)
+  gazetteer_file <- file.path(
+    ref_df,
+    "bc_gazetteer_2026_06_03.xlsx"
+  )
+
+  stopifnot(file.exists(gazetteer_file))
+
+  bc_namesraw <- openxlsx::read.xlsx(
+    xlsxFile = gazetteer_file,
+    sheet = 1,
+    check.names = FALSE
+  )
+
+  bc_namesraw$Official.Name.original <- bc_namesraw$Official.Name
+
+  source(file.path(script_dir, "01_loc_spelling_inspec.R"))
+  bc_namesraw$name_deco <- decode_html_numeric(bc_namesraw$Official.Name)
+  bc_names <- bc_namesraw %>%
+    select(name_deco)
+}
+
+if (isTRUE(check_loc_spelling)) {
+  source(file.path(script_dir, "01_loc_spelling_inspec.R"))
+  bc_vocabulary <- build_location_vocabulary(
+  data = bc_names,
+  column = "name_deco"
+  )
+}
+
+if (isTRUE(check_loc_spelling)) {
+  source(file.path(script_dir, "01_loc_spelling_inspec.R"))
+  location_spelling_issues <- check_location_vocabulary(
+  x = d2[["Descriptive Location"]],
+  vocabulary = bc_vocabulary,
+  vocab_col = "word"
+  )
+
+  write.csv(location_spelling_issues, file.path(ref_results, "current_loc_inspections.csv"), row.names = FALSE)
+  message("\033[31;1mDescriptive location spelling results saved to ref_results.\033[0m")
+} else {
+  message("\033[31;1mSkipped descriptive location spelling check. Set check_loc_spelling = TRUE to run the audit.\033[0m")
+}
+
 
 #check groups --------------------
-sort(unique(trimws(unlist(strsplit(d2$Group, ",")))))
-d2[Group == "fire-interactions-values", .(ID, Title)]
+#sort(unique(trimws(unlist(strsplit(d2$Group, ",")))))
+#d2[Group == "fire-prescribed-fire", .(ID, Title)]
 
 
 #check organization --------------------
@@ -214,35 +293,129 @@ d2[, Organization := gsub('^"+|"+$', '', Organization)]
 d2[, Organization := trimws(Organization)]
 sort(unique(trimws(unlist(d2$Organization))))
 
-d2[Organization == "Society for Ecological Restoration (SER) BC Chapter", .(ID, Title)]
 
 d2$Title
 d2$License
 
+# Optional: Cross-reference tags with controlled taglist
+# Using functions defined in 01_tag_audit.R in script_dir
+if (isTRUE(run_tag_audit)) {
+    message("\033[31;1mCross-referencing tags with controlled taglist...\033[0m")
+  #cross reference check with control taglist:
+# 1- build current tag inventory from the dataset
+library(tidyr)
+make_tag_key <- function(x) {
+  x %>%
+    as.character() %>%
+    stringi::stri_trans_nfc() %>%              # preserve Unicode consistently
+    str_replace_all("[\u2010-\u2015]", "-") %>% # normalize weird dash types
+    str_replace_all("\\s+", " ") %>%
+    str_squish() %>%
+    str_to_lower()
+}
 
-## -----------------------------------------------------------------------------
-sort(upload_now$ID)
-sort(d2$ID)
+tags_long <- d2 %>%
+  mutate(record_id = row_number()) %>%
+  separate_longer_delim(Tags, delim = ",") %>%
+  mutate(
+    tag_raw = Tags,
+    tag_clean = str_squish(tag_raw),
+    tag_key = make_tag_key(tag_clean)
+  ) %>%
+  filter(!is.na(tag_clean), tag_clean != "")
 
-d2_to_upload <- merge(d2, upload_now[upload_now == "Yes", 
-                                   .(ID, upload_now)], by = "ID")
+tag_inventory <- tags_long %>%
+  count(tag_clean, tag_key, name = "n_records") %>%
+  arrange(tag_clean)
 
-d4_to_upload <- merge(d4, upload_now[upload_now == "Yes", 
-                                  .(ID, upload_now)],
-                      by.x = "Dataset_ID",
-                      by.y = "ID")
-d2_to_upload[, upload_now := NULL]
-d4_to_upload[, upload_now := NULL]
+write.csv(tag_inventory, file.path(ref_results, "current_tag_inventory.csv"), row.names = FALSE)
+
+#2- read in the controlled taglist and pivot to long format
+library(readr)
+controlled_wide <- readr::read_csv(
+  (file.path(ref_df, "01_controlled taglist_jan_2026.csv")),
+  skip = 1,
+  show_col_types = FALSE
+)
+
+controlled_long <- controlled_wide %>%
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to = "tag_category",
+    values_to = "controlled_tag"
+  ) %>%
+  dplyr::mutate(
+    controlled_tag = stringr::str_squish(as.character(controlled_tag))
+  ) %>%
+  dplyr::filter(
+    !is.na(controlled_tag),
+    controlled_tag != ""
+  ) %>%
+  dplyr::distinct(tag_category, controlled_tag) %>%
+  dplyr::arrange(tag_category, controlled_tag)%>%
+  dplyr::mutate(
+    controlled_key = make_tag_key(controlled_tag)
+  )
+
+#2.1 (handles different meanings for same spellings but with upper and lower case (i.e. At vs AT))
+controlled_exact_index <- controlled_long %>%
+  dplyr::group_by(controlled_tag) %>%
+  dplyr::summarise(
+    exact_categories = paste(unique(tag_category), collapse = "; "),
+    .groups = "drop"
+  )
+
+controlled_key_index <- controlled_long %>%
+  dplyr::group_by(controlled_key) %>%
+  dplyr::summarise(
+    n_controlled_tags = dplyr::n_distinct(controlled_tag),
+    possible_matches = paste(
+      unique(paste0(tag_category, " = ", controlled_tag)),
+      collapse = " | "
+    ),
+    .groups = "drop"
+  )
+
+#3- compare the two lists and identify any tags that are not in the controlled list
+tag_audit <- tag_inventory %>%
+  dplyr::left_join(
+    controlled_exact_index,
+    by = c("tag_clean" = "controlled_tag")
+  ) %>%
+  dplyr::left_join(
+    controlled_key_index,
+    by = c("tag_key" = "controlled_key")
+  ) %>%
+  dplyr::mutate(
+    status = dplyr::case_when(
+      !is.na(exact_categories) ~ "exact match",
+      
+      is.na(exact_categories) &
+        !is.na(possible_matches) &
+        n_controlled_tags == 1 ~ "normalized match only: review spelling/case/style",
+      
+      is.na(exact_categories) &
+        !is.na(possible_matches) &
+        n_controlled_tags > 1 ~ "ambiguous normalized match: review",
+      
+      TRUE ~ "not in controlled list"
+    )
+  ) %>%
+  dplyr::arrange(status, tag_clean)
+
+write.csv(tag_audit, file.path(ref_results, "current_tag_audits.csv"), row.names = FALSE)
+message("\033[31;1mTag auditing results saved to ref_results\033[0m")
+
+} else {
+  message("\033[31;1mSkipped tag cross referencing. Set run_tag_audit = TRUE to run the audit.\033[0m")
+}
+
 
 #write out the dataset file:
-fwrite(d2_to_upload[21:31], file.path(out_dir,"datasets data","datasets_190126.csv"))
+fwrite(d2[1:10], file.path(out_dir,"datasets data","datasets_070526_batch1.csv"))
 
 #write out the resources file:
-fwrite(d4_to_upload[21:31], file.path(out_dir,"resources data","resources_190126.csv"))
-
-
-
-
+fwrite(d4[1:10], file.path(out_dir,"resources data","resources_070526_batch1.csv"))
 
 # write out the ones that failed to upload:
 #write out the dataset file:
